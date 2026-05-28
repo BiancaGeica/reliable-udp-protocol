@@ -134,14 +134,17 @@ void *sender_handler(void *arg)
                 if (con == NULL) continue;
                 
                 pthread_mutex_lock(&con->con_lock);
-                uint16_t base = con->current_seq;
-                int idx = base % MAX_NUMBER_PKTS;
                 
-                if (con->send_window[idx].is_occupied) {
-                     sendto(con->sockfd, con->send_window[idx].pkt.data, 
-                            con->send_window[idx].pkt.len, 0, 
-                            (struct sockaddr*)&con->servaddr, sizeof(con->servaddr));
+                for(uint16_t s = con->current_seq; s != con->next_seq; s++) {
+                    int idx = s % MAX_NUMBER_PKTS;
+                    
+                    if (con->send_window[idx].is_occupied) {
+                        sendto(con->sockfd, con->send_window[idx].pkt.data, 
+                                con->send_window[idx].pkt.len, 0, 
+                                (struct sockaddr*)&con->servaddr, sizeof(con->servaddr));
+                    }
                 }
+                
                 pthread_mutex_unlock(&con->con_lock);
             }
             continue;
