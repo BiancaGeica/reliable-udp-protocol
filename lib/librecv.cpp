@@ -278,35 +278,8 @@ int wait4connect(uint32_t ip, uint16_t port)
         printf("Trimitere syn-ack...\n");
         sendto(server_sock, send_buffer, sizeof(struct poli_tcp_data_hdr) + sizeof(uint16_t), 0, (struct sockaddr*)&client_address, len);
 
-        // asteptare ack final de la client (sender)
-
-        struct timeval tv = {2, 0}; // 2 secunde timeout
-        if (setsockopt(con->sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-            perror("Eroare la setare timeout\n");
-        }
-
-        printf("Aspace ACK final de la sender...\n");
-        int ack_bytes = recvfrom(con->sockfd, buffer, sizeof(buffer), 0, NULL, NULL);
-        
-        if (ack_bytes < 0) {
-            printf("EROARE: Timeout la primirea ACK-ului final. O luam de la capat!\n");
-            free(con);  
-            continue;
-        }
-        
-        // se face cast la header pentru a putea verifica daca este ack
-        struct poli_tcp_ctrl_hdr *ack_hdr = (struct poli_tcp_ctrl_hdr *)buffer;
-        
-        if (ack_hdr->type == ACK) {
-            printf("Handshake finalizat, sa inceapa transmiterea de date...\n");
-
-            struct timeval tv_zero = {0, 0};
-            setsockopt(con->sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv_zero, sizeof(tv_zero));
-        } else {
-            printf("EROARE: Nu s-a primit ack\n");
-            free(con);
-            continue; // daca este pachet invalid s-a stricat tot handshake-ul
-        }
+        struct timeval tv_zero = {0, 0};
+        setsockopt(con->sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv_zero, sizeof(tv_zero));
 
         /* Since we can have multiple connection, we want to know if data is available
         on the socket used by a given connection. We use POLL for this */
