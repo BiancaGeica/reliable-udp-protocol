@@ -32,17 +32,22 @@ int send_data(int conn_id, char *buffer, int len)
 {
     /* We will write code here as to not have sync problems with sender_handler */
 
+    if (len > MAX_DATA_SIZE) {
+        len = MAX_DATA_SIZE;
+    }
+
     pthread_mutex_lock(&cons[conn_id]->con_lock);
 
-    uint16_t pachete_tranzit = cons[conn_id]->next_seq - cons[conn_id]->current_seq;
-
-    while (pachete_tranzit >= max_window_pkts || cons[conn_id]->recv_window_size < len) {
-        pthread_mutex_unlock(&cons[conn_id]->con_lock);
-        usleep(1000);
-        pthread_mutex_lock(&cons[conn_id]->con_lock);
+    while (true) {
+        int16_t pachete_tranzit = (int16_t)(cons[conn_id]->next_seq - cons[conn_id]->current_seq);
         
-        // recalculez in cazul in care s-a eliberat un loc in buffer-ul meu
-        pachete_tranzit = cons[conn_id]->next_seq - cons[conn_id]->current_seq;
+        if (pachete_tranzit < max_window_pkts) {
+            break;
+        }
+
+        pthread_mutex_unlock(&cons[conn_id]->con_lock);
+        usleep(100);
+        pthread_mutex_lock(&cons[conn_id]->con_lock);
     }
 
     // calculul pozitiei unde o sa vina pachetul de pe teava
@@ -135,13 +140,14 @@ void *sender_handler(void *arg)
                 
                 pthread_mutex_lock(&con->con_lock);
                 
-                for(uint16_t s = con->current_seq; s != con->next_seq; s++) {
+                int count = 0;
+                for(uint16_t s = con->current_seq; s != con->next_seq && count < 5; s++) {
                     int idx = s % MAX_NUMBER_PKTS;
-                    
                     if (con->send_window[idx].is_occupied) {
-                        sendto(con->sockfd, con->send_window[idx].pkt.data, 
+                         sendto(con->sockfd, con->send_window[idx].pkt.data, 
                                 con->send_window[idx].pkt.len, 0, 
                                 (struct sockaddr*)&con->servaddr, sizeof(con->servaddr));
+                         count++;
                     }
                 }
                 
@@ -161,15 +167,18 @@ void *sender_handler(void *arg)
         
         if (ack_hdr->type == ACK) {
             uint16_t ack_num = ack_hdr->ack_num;
-            
             cons[conn_id]->recv_window_size = ack_hdr->recv_window;
             
-            while (cons[conn_id]->current_seq != ack_num) {
-                int idx = cons[conn_id]->current_seq % MAX_NUMBER_PKTS;
-                cons[conn_id]->send_window[idx].is_occupied = false;
-                cons[conn_id]->send_window[idx].is_sent = false;
-                
-                cons[conn_id]->current_seq++; // se muta fereastra glisanta la dreapta
+            int16_t diff = (int16_t)(ack_num - cons[conn_id]->current_seq);
+            
+            if (diff > 0) {
+                while (cons[conn_id]->current_seq != ack_num) {
+                    int idx = cons[conn_id]->current_seq % MAX_NUMBER_PKTS;
+                    cons[conn_id]->send_window[idx].is_occupied = false;
+                    cons[conn_id]->send_window[idx].is_sent = false;
+                    
+                    cons[conn_id]->current_seq++; // se muta fereastra glisanta la dreapta
+                }
             }
         }
 
@@ -253,11 +262,12 @@ int setup_connection(uint32_t ip, uint16_t port)
     ack_primire_packet.conn_id = conn_id;
 
     printf("Se trimite ack catre server...\n");
-    sendto(con->sockfd, &ack_primire_packet, sizeof(ack_primire_packet), 0, (struct sockaddr*)&con->servaddr, sizeof(con->servaddr));
+    for (int k = 0; k < 5; k++) {
+        sendto(con->sockfd, &ack_primire_packet, sizeof(ack_primire_packet), 0, (struct sockaddr*)&con->servaddr, sizeof(con->servaddr));
+        usleep(2000); // doua milisecunde intre fiecare trimitere de pachet
+    }
 
-    struct timeval tv = {0}; 
-    tv.tv_sec = 2;   // 2 secunde
-    tv.tv_usec = 0; // 0 microsecunde
+    struct timeval tv = {0, 0};
     if (setsockopt(con->sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
         perror("Error");
     }
@@ -276,9 +286,9 @@ int setup_connection(uint32_t ip, uint16_t port)
     timer_fds[fdmax].events = POLLIN;    
     struct itimerspec spec;     
     spec.it_value.tv_sec = 0;
-    spec.it_value.tv_nsec = 200000000;
+    spec.it_value.tv_nsec = 10000000;
     spec.it_interval.tv_sec = 0;
-    spec.it_interval.tv_nsec = 200000000;
+    spec.it_interval.tv_nsec = 10000000; // NU MA MAI ATING DE ASTA CA O SA CRAPEEEE (mai rau)
     timerfd_settime(timer_fds[fdmax].fd, 0, &spec, NULL);  
     fdmax++;
 
@@ -294,9 +304,7 @@ int setup_connection(uint32_t ip, uint16_t port)
 
 void init_sender(int speed, int delay)
 {
-    double rtt_sec = (2.0 * delay) / 1000.0;
-    double bdp = (speed * 1024.0 * 1024.0 / 8.0) * rtt_sec;
-    max_window_pkts = bdp / MAX_SEGMENT_SIZE;
+    max_window_pkts = 150;
 
     if (max_window_pkts < 10) {
         max_window_pkts = 10;

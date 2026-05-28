@@ -52,6 +52,7 @@ int recv_data(int conn_id, char *buffer, int len)
     // copiez datele in fisierul de out
     memcpy(buffer, cons[conn_id]->app_buffer + cons[conn_id]->app_buffer_start, size);
 
+    // actualizare spatiu memorie ocupat de date
     cons[conn_id]->app_buffer_start += size;
     cons[conn_id]->app_buffer_len -= size;
 
@@ -59,6 +60,7 @@ int recv_data(int conn_id, char *buffer, int len)
         cons[conn_id]->app_buffer_start = 0;
     }
 
+    // actualizare memorie libera in buffer
     cons[conn_id]->recv_window_size = MAX_SIZE_BUFFER - cons[conn_id]->app_buffer_len;
 
     pthread_mutex_unlock(&cons[conn_id]->con_lock);
@@ -73,7 +75,12 @@ void send_ack(int connection_id, uint16_t ack_num)
     ack.conn_id = connection_id;
     ack.protocol_id = POLI_PROTOCOL_ID;
     ack.type = ACK;
-    ack.recv_window = cons[connection_id]->recv_window_size;
+    
+    int available = MAX_SIZE_BUFFER - cons[connection_id]->app_buffer_len;
+    if (available > 65535) {
+        available = 65535;
+    }
+    ack.recv_window = available;
 
     sendto(cons[connection_id]->sockfd, &ack, sizeof(ack), 0, (struct sockaddr*)&cons[connection_id]->servaddr, sizeof(cons[connection_id]->servaddr));
 }
@@ -128,11 +135,6 @@ void empty_waiting_room(int conn_id)
             } else {
                 break;
             }
-
-            //save_in_buffer(conn_id, future_payload, future_hdr->len);
-            
-            //cons[conn_id]->out_of_order_window[idx].is_occupied = false;
-            //cons[conn_id]->expected_seq++;
         } else {
             break;
         }
@@ -175,9 +177,11 @@ void *receiver_handler(void *arg)
             int payload_len = hdr->len;
             char *payload = segment + sizeof(struct poli_tcp_data_hdr); 
 
-            if (seq < cons[connection_id]->expected_seq) { // daca e duplicat, doar se trimite ack ca a fost primit
+            int16_t diff = (int16_t)(seq - cons[connection_id]->expected_seq);
+
+            if (diff < 0) { // daca e duplicat, doar se trimite ack ca a fost primit
             } 
-            else if (seq > cons[connection_id]->expected_seq) {
+            else if (diff > 0) {
                 save_future_package(connection_id, seq, segment, res); // daca pachetul a fost trimis inainte de cel care trebuia sa vina, este pus in asteptare
             } 
             else {
@@ -281,7 +285,7 @@ int wait4connect(uint32_t ip, uint16_t port)
             perror("Eroare la setare timeout\n");
         }
 
-        printf("Asteptare ACK final de la sender...\n");
+        printf("Aspace ACK final de la sender...\n");
         int ack_bytes = recvfrom(con->sockfd, buffer, sizeof(buffer), 0, NULL, NULL);
         
         if (ack_bytes < 0) {
