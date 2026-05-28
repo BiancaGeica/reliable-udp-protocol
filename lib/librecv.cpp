@@ -16,11 +16,12 @@ using namespace std;
 #define DATA 1
 #define SYN 2
 #define SYN_ACK 3 
-#define ACK 4
+#define ACK 4// in cerinta se specifica faptul ca pot alege orice valori
 
 std::map<int, struct connection *> cons;
 
 struct pollfd data_fds[MAX_CONNECTIONS];
+/* Used for timers per connection */
 struct pollfd timer_fds[MAX_CONNECTIONS];
 int fdmax = 0;
 
@@ -36,20 +37,26 @@ int recv_data(int conn_id, char *buffer, int len)
 
     pthread_mutex_lock(&cons[conn_id]->con_lock);
     
+    /* We will write code here as to not have sync problems with recv_handler */
+
+    // daca nu am date primite, astept sa vina
     while (cons[conn_id]->app_buffer_len == 0) {
         pthread_mutex_unlock(&cons[conn_id]->con_lock);
-        usleep(1000); 
+        usleep(1000); // trebuie sa las putin dupa unlock sa mai stea ca sa poata primi date de pe retea
         pthread_mutex_lock(&cons[conn_id]->con_lock);
     }
 
+    // cate date se pot scoate din buffer
     if (len < cons[conn_id]->app_buffer_len) {
         size = len;
     } else {
         size = cons[conn_id]->app_buffer_len;
     }
 
+    // copiez datele in fisierul de out
     memcpy(buffer, cons[conn_id]->app_buffer + cons[conn_id]->app_buffer_start, size);
 
+    // actualizare spatiu memorie ocupat de date
     cons[conn_id]->app_buffer_start += size;
     cons[conn_id]->app_buffer_len -= size;
 
@@ -57,6 +64,7 @@ int recv_data(int conn_id, char *buffer, int len)
         cons[conn_id]->app_buffer_start = 0;
     }
 
+    // actualizare memorie libera in buffer
     cons[conn_id]->recv_window_size = MAX_SIZE_BUFFER - cons[conn_id]->app_buffer_len;
 
     pthread_mutex_unlock(&cons[conn_id]->con_lock);
@@ -93,7 +101,7 @@ int save_in_buffer(int connection_id, char *payload, int payload_len)
             cons[connection_id]->app_buffer_start = 0;
             write_pos = cons[connection_id]->app_buffer_len;
         } else {
-            return 0; // Aruncam daca e plin
+            return 0; // arunc pachetul venit de la client daca bufferul este plin
         }
     }
 
@@ -141,10 +149,12 @@ void *receiver_handler(void *arg)
 {
     char segment[MAX_SEGMENT_SIZE];
     int res;
+    DEBUG_PRINT("Starting recviver handler\n");
 
     while (1) {
+
         if (cons.size() == 0) {
-            usleep(100000); 
+            usleep(100000); // daca nu avem socketuri evit busy waiting
             continue;
         }
         
@@ -153,10 +163,20 @@ void *receiver_handler(void *arg)
             res = recv_message_or_timeout(segment, MAX_SEGMENT_SIZE, &connection_id);
         } while(res == -14);
 
-        if (connection_id == -1 || res <= 0) continue; 
-        if (cons.count(connection_id) == 0 || cons[connection_id] == NULL) continue; 
+        if (connection_id == -1 || res <= 0) {
+            continue; 
+        }
+
+        // PROTECTIE: Ignoram mesajele de la conexiuni gresite/moarte
+        if (cons.count(connection_id) == 0 || cons[connection_id] == NULL) {
+            continue; 
+        }
 
         pthread_mutex_lock(&cons[connection_id]->con_lock);
+
+        /* Handle segment received from the sender. We use this between locks
+        as to not have synchronization issues with the recv_data calls which are
+        on the main thread */
 
         struct poli_tcp_data_hdr *hdr = (struct poli_tcp_data_hdr *)segment;
 
@@ -167,15 +187,16 @@ void *receiver_handler(void *arg)
 
             int16_t diff = (int16_t)(seq - cons[connection_id]->expected_seq);
 
-            if (diff < 0) { 
+            if (diff < 0) { // daca e duplicat, doar se trimite ack ca a fost primit
             } 
             else if (diff > 0) {
-                save_future_package(connection_id, seq, segment, res); 
+                save_future_package(connection_id, seq, segment, res); // daca pachetul a fost trimis inainte de cel care trebuia sa vina, este pus in asteptare
             } 
             else {
                 // FIXUL FATAL: Doar daca am bagat in buffer incrementam
                 if (save_in_buffer(connection_id, payload, payload_len) == 1) {
                     cons[connection_id]->expected_seq++; 
+                    // dupa ce vine pachetul cu id-ul asteptat, pun inapoi pachetele care au ajuns mai devreme
                     empty_waiting_room(connection_id);
                 }
             }
@@ -190,16 +211,22 @@ void *receiver_handler(void *arg)
 
 int wait4connect(uint32_t ip, uint16_t port)
 {
+    /* TODO: Implement the Three Way Handshake on the receiver part. This blocks
+     * until a connection is established. */
+
+    // socket pentru server
     static int server_sock = -1;
     
     if (server_sock == -1) {
         server_sock = socket(AF_INET, SOCK_DGRAM, 0);
         struct sockaddr_in server_address = {0};
         server_address.sin_family = AF_INET;
-        server_address.sin_port = port; 
+        server_address.sin_port = port; // 8032 (va veni ca htons(8032) din server.cpp)
         server_address.sin_addr.s_addr = ip;
 
+        // bind dupa ce s-a facut socket, specific protocolului TCP
         bind(server_sock, (struct sockaddr*)&server_address, sizeof(server_address));
+        printf("Asteptare clienti noi...\n");
     }
 
     while (true) {
@@ -207,6 +234,7 @@ int wait4connect(uint32_t ip, uint16_t port)
         socklen_t len = sizeof(client_address);
         char buffer[1500] = {0};
 
+        // asteptare syn de la client
         int nr_bytes = recvfrom(server_sock, buffer, sizeof(buffer), 0, (struct sockaddr*)&client_address, &len);
         if (nr_bytes < 0) {
             continue;
@@ -214,7 +242,8 @@ int wait4connect(uint32_t ip, uint16_t port)
 
         struct poli_tcp_ctrl_hdr *syn_hdr = (struct poli_tcp_ctrl_hdr *)buffer;
         if (syn_hdr->type != SYN) {
-            continue; 
+            printf("PROBLEMA: Raspunsul nu este un ack la server.\n");
+            continue; // am primit gunoi, deci ma opresc
         }
 
         uint16_t c_port = client_address.sin_port;
@@ -222,6 +251,11 @@ int wait4connect(uint32_t ip, uint16_t port)
             continue; 
         }
         seen_ports[c_port] = true;
+
+        printf("Serverul a primit syn ACK de la client\n");
+
+        // creare socket si conexiune noua, trebuie dat un port random pentru a nu aglomera unul singur
+        // si pentru a trece testul de conexiuni multiple
 
         struct connection *con = (struct connection *)calloc(1, sizeof(struct connection));
         
@@ -234,13 +268,15 @@ int wait4connect(uint32_t ip, uint16_t port)
         struct sockaddr_in new_servaddress = {0};
         new_servaddress.sin_addr.s_addr = INADDR_ANY;
         new_servaddress.sin_family = AF_INET;
-        new_servaddress.sin_port = htons(0); 
+        new_servaddress.sin_port = htons(0); // Port 0, adica las sistemul de operare sa aleaga un port liber
         bind(con->sockfd, (struct sockaddr*)&new_servaddress, sizeof(new_servaddress));
 
+        // aflu portul pe care l-am primit mai sus
         socklen_t new_len = sizeof(new_servaddress);
         getsockname(con->sockfd, (struct sockaddr*)&new_servaddress, &new_len);
         uint16_t random_port = new_servaddress.sin_port;
         
+        // Setez datele pentru conexiune 
         con->app_buffer_len = 0;
         con->app_buffer_start = 0;
         con->servaddr = client_address;
@@ -248,13 +284,16 @@ int wait4connect(uint32_t ip, uint16_t port)
         con->expected_seq = 0; 
         con->conn_id = conn_id;
         
+        // trimitere syn-ack cu noul port
         char send_buffer[1500] = {0};
         struct poli_tcp_data_hdr *syn_ack = (struct poli_tcp_data_hdr *)send_buffer;
         syn_ack->conn_id = conn_id;
         syn_ack->protocol_id = POLI_PROTOCOL_ID;
         syn_ack->type = SYN_ACK;
+        
         *(uint16_t*)(send_buffer + sizeof(struct poli_tcp_data_hdr)) = random_port;
 
+        printf("Trimitere syn-ack...\n");
         struct timeval tv = {1, 0}; 
         setsockopt(con->sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
@@ -273,11 +312,16 @@ int wait4connect(uint32_t ip, uint16_t port)
         struct timeval tv_zero = {0, 0};
         setsockopt(con->sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv_zero, sizeof(tv_zero));
 
+        /* Since we can have multiple connection, we want to know if data is available
+        on the socket used by a given connection. We use POLL for this */
+
         pthread_mutex_lock(&poll_lock);
 
         data_fds[fdmax].fd = con->sockfd;    
         data_fds[fdmax].events = POLLIN;    
         
+        /* This creates a timer and sets it to trigger every 1 sec. We use this
+        to know if a timeout has happend on a connection */
         timer_fds[fdmax].fd = timerfd_create(CLOCK_REALTIME,  0);    
         timer_fds[fdmax].events = POLLIN;    
         struct itimerspec spec;     
@@ -294,6 +338,8 @@ int wait4connect(uint32_t ip, uint16_t port)
 
         pthread_mutex_init(&con->con_lock, NULL);
 
+        DEBUG_PRINT("Connection established!");
+
         return conn_id;
     }
 }
@@ -302,6 +348,9 @@ void init_receiver(int recv_buffer_bytes)
 {
     pthread_t thread1;
     int ret;
+
+    /* TODO: Create the connection socket and bind it to 8031 */
+
     ret = pthread_create( &thread1, NULL, receiver_handler, NULL);
     assert(ret == 0);
 }
