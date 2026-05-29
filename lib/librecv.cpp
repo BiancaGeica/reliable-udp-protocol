@@ -18,18 +18,18 @@ using namespace std;
 #define SYN_ACK 3 
 #define ACK 4// in cerinta se specifica faptul ca pot alege orice valori
 
-std::map<int, struct connection *> cons;
+std::map<int, struct connection *> cons; // retine toate conexiunile active
 
 struct pollfd data_fds[MAX_CONNECTIONS];
 /* Used for timers per connection */
 struct pollfd timer_fds[MAX_CONNECTIONS];
-int fdmax = 0;
+int fdmax = 0; // numar conexiuni ascultate simultan
 
 pthread_mutex_t poll_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t id_lock = PTHREAD_MUTEX_INITIALIZER;
 static int next_conn_id = 0;
 
-static std::map<uint16_t, bool> seen_ports;
+static std::map<uint16_t, bool> seen_ports; // pentru a tine minte ce a fost procesat deja, ignorand dubluri
 
 int recv_data(int conn_id, char *buffer, int len)
 {
@@ -46,21 +46,21 @@ int recv_data(int conn_id, char *buffer, int len)
         pthread_mutex_lock(&cons[conn_id]->con_lock);
     }
 
-    // cate date se pot scoate din buffer
+    // cate date se pot citi
     if (len < cons[conn_id]->app_buffer_len) {
         size = len;
     } else {
         size = cons[conn_id]->app_buffer_len;
     }
 
-    // copiez datele in fisierul de out
+    //COPIERE IN FISIERUL DE OUTTTT, mai trebuie si puse undeva datele acelea citite ca nu am muncit degeaba sa le trimit
     memcpy(buffer, cons[conn_id]->app_buffer + cons[conn_id]->app_buffer_start, size);
 
     // actualizare spatiu memorie ocupat de date
     cons[conn_id]->app_buffer_start += size;
     cons[conn_id]->app_buffer_len -= size;
 
-    if (cons[conn_id]->app_buffer_len == 0) {
+    if (cons[conn_id]->app_buffer_len == 0) { // resetare contor sa nu faca overflow bufferul
         cons[conn_id]->app_buffer_start = 0;
     }
 
@@ -81,7 +81,7 @@ void send_ack(int connection_id, uint16_t ack_num)
     ack.type = ACK;
     
     int available = MAX_SIZE_BUFFER - cons[connection_id]->app_buffer_len;
-    if (available > 65535) {
+    if (available > 65535) { // valoarea maxima care poate fi stocata intr-o variabila pe 16 biti
         available = 65535;
     }
     ack.recv_window = available;
@@ -93,7 +93,7 @@ int save_in_buffer(int connection_id, char *payload, int payload_len)
 {
     int write_pos = cons[connection_id]->app_buffer_start + cons[connection_id]->app_buffer_len;
     
-    if (write_pos + payload_len > MAX_SIZE_BUFFER) {
+    if (write_pos + payload_len > MAX_SIZE_BUFFER) { // daca se face overflow
         if (cons[connection_id]->app_buffer_len + payload_len <= MAX_SIZE_BUFFER) {
             memmove(cons[connection_id]->app_buffer, 
                     cons[connection_id]->app_buffer + cons[connection_id]->app_buffer_start, 
@@ -101,10 +101,11 @@ int save_in_buffer(int connection_id, char *payload, int payload_len)
             cons[connection_id]->app_buffer_start = 0;
             write_pos = cons[connection_id]->app_buffer_len;
         } else {
-            return 0; // arunc pachetul venit de la client daca bufferul este plin
+            return 0; // arunc pachetul venit de la client
         }
     }
 
+    // cazul fericit in care este loc
     memcpy(cons[connection_id]->app_buffer + write_pos, payload, payload_len);
     cons[connection_id]->app_buffer_len += payload_len;
     return 1;
@@ -122,7 +123,8 @@ void save_future_package(int connection_id, uint16_t seq, char *segment, int tot
     }
 }
 
-void empty_waiting_room(int conn_id) 
+// pentru a verifica daca un pachet a venit deja
+void empty_waiting_room(int conn_id)
 {
     for (int i = 0; i < MAX_NUMBER_PKTS; i++) {
         int idx = cons[conn_id]->expected_seq % MAX_NUMBER_PKTS;
@@ -137,7 +139,7 @@ void empty_waiting_room(int conn_id)
                 cons[conn_id]->out_of_order_window[idx].is_occupied = false;
                 cons[conn_id]->expected_seq++;
             } else {
-                break;
+                break; // iar face overflow
             }
         } else {
             break;
@@ -154,7 +156,7 @@ void *receiver_handler(void *arg)
     while (1) {
 
         if (cons.size() == 0) {
-            usleep(100000); // daca nu avem socketuri evit busy waiting
+            usleep(100000); // daca nu am socketuri evit busy waiting
             continue;
         }
         
@@ -168,7 +170,7 @@ void *receiver_handler(void *arg)
         }
 
         // PROTECTIE: Ignoram mesajele de la conexiuni gresite/moarte
-        if (cons.count(connection_id) == 0 || cons[connection_id] == NULL) {
+        if (cons.count(connection_id) == 0 || cons[connection_id] == NULL) { // sa nu faca deadlock
             continue; 
         }
 
@@ -201,6 +203,7 @@ void *receiver_handler(void *arg)
                 }
             }
 
+            // se calculeaza noul spatiu si se trimite ack inapoi clientului
             cons[connection_id]->recv_window_size = MAX_SIZE_BUFFER - cons[connection_id]->app_buffer_len;
             send_ack(connection_id, cons[connection_id]->expected_seq);
         }
@@ -332,7 +335,7 @@ int wait4connect(uint32_t ip, uint16_t port)
         timerfd_settime(timer_fds[fdmax].fd, 0, &spec, NULL);    
         fdmax++;    
 
-        cons.insert({conn_id, con});
+        cons.insert({conn_id, con}); // se adauga conexiunea in dictionar
 
         pthread_mutex_unlock(&poll_lock);
 

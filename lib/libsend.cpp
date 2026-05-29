@@ -18,14 +18,14 @@ using namespace std;
 #define SYN_ACK 3 
 #define ACK 4// in cerinta se specifica faptul ca pot alege orice valori
 
-std::map<int, struct connection *> cons;
+std::map<int, struct connection *> cons; // asociaza fiecare ID de conexiune cu structura ei pentru a gestiona utilizatori multipli
 
 struct pollfd data_fds[MAX_CONNECTIONS];
 /* Used for timers per connection */
 struct pollfd timer_fds[MAX_CONNECTIONS];
-int fdmax = 0;
+int fdmax = 0; // cate conexiuni asculta in momentul actual
 // fereastra cu BDP
-int max_window_pkts = MAX_NUMBER_PKTS;
+int max_window_pkts = MAX_NUMBER_PKTS; // marime fereastra, adica cate pachete pot fi pe fir in acelasi timp fara ack
 pthread_mutex_t poll_lock = PTHREAD_MUTEX_INITIALIZER;
 
 // conn_id vine de la server, nu mai generam local
@@ -35,21 +35,21 @@ int send_data(int conn_id, char *buffer, int len)
 {
     /* We will write code here as to not have sync problems with sender_handler */
 
-    if (len > MAX_DATA_SIZE) {
+    if (len > MAX_DATA_SIZE) { // in cazul in care clientul incearca sa trimita un pachet mai mare decat poate reteaua
         len = MAX_DATA_SIZE;
     }
 
     pthread_mutex_lock(&cons[conn_id]->con_lock);
 
-    while (true) {
+    while (true) { // fereastra glisanta
         int16_t pachete_tranzit = (int16_t)(cons[conn_id]->next_seq - cons[conn_id]->current_seq);
         
-        if (pachete_tranzit < max_window_pkts) {
+        if (pachete_tranzit < max_window_pkts) { // daca au loc toate pachetele, trec la treaba
             break;
         }
 
         pthread_mutex_unlock(&cons[conn_id]->con_lock);
-        usleep(100);
+        usleep(100); // timp pentru thread sa curete fereastra in cazul in care e full
         pthread_mutex_lock(&cons[conn_id]->con_lock);
     }
 
@@ -92,14 +92,14 @@ void *sender_handler(void *arg)
         as to not have synchronization issues with the send_data calls which are
         on the main thread */
 
-    while (1) {
+    while (1) { // daca nu am conexiuni, astept sa apara
 
         if (cons.size() == 0) {
             usleep(100000);
             continue;
         }
 
-        // trimitere pachete noi din buffer
+        // trimitere pachete deja existente din buffer
         for (int i = 0; i < MAX_CONNECTIONS; i++) {
             if (cons.count(i) == 0) {
                 continue;
@@ -129,13 +129,13 @@ void *sender_handler(void *arg)
             pthread_mutex_unlock(&con->con_lock);
         }
 
-        // asteapta un eveniment de la server
+        // asteapta sa vada ce se intampla pe retea
         int conn_id = -1;
         do {
-            res = recv_message_or_timeout(buf, MAX_SEGMENT_SIZE, &conn_id);
+            res = recv_message_or_timeout(buf, MAX_SEGMENT_SIZE, &conn_id); // cazul de timeout
         } while(res == -14);
 
-        if (res == -1) {
+        if (res == -1) { // daca da timeout inseamna ca s-au pierdut datele trimise
             for (int i = 0; i < MAX_CONNECTIONS; i++) {
                 if (cons.count(i) == 0) continue;
                 struct connection *con = cons[i];
@@ -144,7 +144,7 @@ void *sender_handler(void *arg)
                 pthread_mutex_lock(&con->con_lock);
                 
                 int count = 0;
-                for(uint16_t s = con->current_seq; s != con->next_seq && count < 4; s++) {
+                for(uint16_t s = con->current_seq; s != con->next_seq && count < 4; s++) { // nu retrimit toata fereastra ca blochez reteaua si pica testele de timp
                     int idx = s % MAX_NUMBER_PKTS;
                     if (con->send_window[idx].is_occupied) {
                          sendto(con->sockfd, con->send_window[idx].pkt.data, 
@@ -164,7 +164,7 @@ void *sender_handler(void *arg)
         }
 
         if (cons.count(conn_id) == 0 || cons[conn_id] == NULL) {
-            continue;
+            continue; // pentru ca se primeau date de la conexiuni terminate
         }
 
         pthread_mutex_lock(&cons[conn_id]->con_lock);
@@ -179,7 +179,7 @@ void *sender_handler(void *arg)
             int16_t diff = (int16_t)(ack_num - cons[conn_id]->current_seq);
             
             if (diff > 0) {
-                while (cons[conn_id]->current_seq != ack_num) {
+                while (cons[conn_id]->current_seq != ack_num) { // curatare fereastra
                     int idx = cons[conn_id]->current_seq % MAX_NUMBER_PKTS;
                     cons[conn_id]->send_window[idx].is_occupied = false;
                     cons[conn_id]->send_window[idx].is_sent = false;
@@ -204,7 +204,7 @@ int setup_connection(uint32_t ip, uint16_t port)
     pthread_mutex_init(&con->con_lock, NULL);
 
     con->recv_window_size = MAX_SIZE_BUFFER;
-    con->sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    con->sockfd = socket(AF_INET, SOCK_DGRAM, 0); // creare socket client-server
 
     /* We will send the SYN on 8031. Then we will receive a SYN-ACK with the connection
      * port. We can use con->sockfd for both cases, but we will need to update server_addr
@@ -243,7 +243,7 @@ int setup_connection(uint32_t ip, uint16_t port)
         bytes_recv = recvfrom(con->sockfd, buffer_client, sizeof(buffer_client), 0, (struct sockaddr*)&ack, &len);
 
         if (bytes_recv >= 0) {
-            break; // daca se primeste raspuns de la server se iese din bucla
+            break; // daca se primeste raspuns de la server se iese din bucla care trimite syn-uri
         }
         
         printf("Aparent SYN s-a pierdut pe retea, retrimitere pachet...\n");
@@ -251,8 +251,8 @@ int setup_connection(uint32_t ip, uint16_t port)
 
     struct poli_tcp_data_hdr *ack_hdr = (struct poli_tcp_data_hdr *)buffer_client;
     
-    // onn_id vine doar de la server
-    int conn_id = ack_hdr->conn_id;
+
+    int conn_id = ack_hdr->conn_id; // se salveaza id-ul de conexiune comunicat de server
     con->conn_id = conn_id;
 
     if (ack_hdr->type == SYN_ACK) {
@@ -277,7 +277,7 @@ int setup_connection(uint32_t ip, uint16_t port)
         usleep(2000); // doua milisecunde intre fiecare trimitere de pachet
     }
 
-    struct timeval tv = {0, 0};
+    struct timeval tv = {0, 0}; // dupa ce se termina handshake-ul, sterg timeout-ul pe socket
     if (setsockopt(con->sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
         perror("Error");
     }
